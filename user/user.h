@@ -23,9 +23,9 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
-void* mmap(void *addr, uint64 length, int prot, int flags, int fd, uint64 offset);
-int munmap(void *addr, uint64 length);
-
+//加入系统调用函数声明
+int sigalarm(int ticks, void (*handler)());
+int sigreturn(void);
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);

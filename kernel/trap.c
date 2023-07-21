@@ -1,19 +1,10 @@
-#define FDEBUG
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
-#include "fcntl.h"
 #include "defs.h"
-
-// 为了用一个 struct file.....
-#include "sleeplock.h"
-#include "fs.h"
-#include "file.h"
-
-#include "dbg_macros.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -25,6 +16,24 @@ void kernelvec();
 
 extern int devintr();
 
+
+// trap.c
+int sigalarm(int ticks, void(*handler)()) {
+  // 设置 myproc 中的相关属性
+  struct proc *p = myproc();
+  p->alarm_interval = ticks;
+  p->alarm_handler = handler;
+  p->alarm_ticks = ticks;
+  return 0;
+}
+
+int sigreturn() {
+  // 将 trapframe 恢复到时钟中断之前的状态，恢复原本正在执行的程序流
+  struct proc *p = myproc();
+  *p->trapframe = *p->alarm_trapframe;
+  p->alarm_goingoff = 0;
+  return 0;
+}
 void
 trapinit(void)
 {
@@ -58,7 +67,7 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  int bad = 0;
+  
   if(r_scause() == 8){
     // system call
 
@@ -76,14 +85,7 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if ((r_scause() == 13 || r_scause() == 15)){
-    try(mmap_fault_handler(r_stval()), bad = 1)
-  }
-  else{
-    bad = 1;
-  }
-
-  if (bad){
+  } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -93,9 +95,21 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    if(p->alarm_interval != 0) { // 如果设定了时钟事件
+      if(--p->alarm_ticks <= 0) { // 时钟倒计时 -1 tick，如果已经到达或超过设定的 tick 数
+        if(!p->alarm_goingoff) { // 确保没有时钟正在运行
+          p->alarm_ticks = p->alarm_interval;
+          // jump to execute alarm_handler
+          *p->alarm_trapframe = *p->trapframe; // backup trapframe
+          p->trapframe->epc = (uint64)p->alarm_handler;
+          p->alarm_goingoff = 1;
+        }
+        // 如果一个时钟到期的时候已经有一个时钟处理函数正在运行，则会推迟到原处理函数运行完成后的下一个 tick 才触发这次时钟
+      }
+    }
     yield();
-
+  }
   usertrapret();
 }
 
@@ -234,65 +248,3 @@ devintr()
   }
 }
 
-struct mmap_vam* 
-get_vma_by_addr(uint64 addr){
-// 接收一个地址，判断这个地址属于哪个 vma
-  struct proc* p = myproc();
-  for(int i = 0; i < VMA_SZ; i++){
-    if(p->mmap_vams[i].in_use && addr >= p->mmap_vams[i].sta_addr && addr < p->mmap_vams[i].sta_addr + p->mmap_vams[i].sz){
-      return p->mmap_vams + i;
-    }
-  }
-  return 0;
-}
-
-int
-mmap_fault_handler(uint64 addr){
-  struct proc* p = myproc();
-  struct mmap_vma* cur_vma;
-  if((cur_vma = get_vma_by_addr(addr)) == 0){
-    return -1;
-  }
-
-  if(!cur_vma->file->readable && r_scause() == 13 && cur_vma->flags & MAP_SHARED){
-    DEBUG("mmap_fault_handler: not readable\n");
-    return -1;
-  } // 读错误
-    
-  if(!cur_vma->file->writable && r_scause() == 15 && cur_vma->flags & MAP_SHARED){
-    DEBUG("mmap_fault_handler: not writable\n");
-    return -1;
-  }
-    
-
-  uint64 pg_sta = PGROUNDDOWN(addr);
-  uint64 pa = kalloc();
-  if(!pa){
-    DEBUG("mmap_fault_handler: kalloc failed\n");
-    return -1;
-  }
-  memset(pa, 0, PGSIZE);
-
-  int perm = PTE_U | PTE_V;
-  if(cur_vma->prot & PROT_READ) perm |= PTE_R;
-  if(cur_vma->prot & PROT_WRITE) perm |= PTE_W;
-  if(cur_vma->prot& PROT_EXEC) perm |= PTE_X;
-  // 在 mmap 的时候已经排除了不可能的情况了
-
-  uint64 off = PGROUNDDOWN(addr - cur_vma->sta_addr); // 因为不是从 addr 开始拷贝，所以也要 PGROUNDOWN
-  // off 代表当前位置超出了其实位置的几倍 PGSIZE
-
-
-  ilock(cur_vma->file->ip);
-  int rdret;
-  if((rdret = readi(cur_vma->file->ip, 0, pa, off, PGSIZE)) == 0){
-    DEBUG("mmap_fault_handler: readi fail\n");
-    iunlock(cur_vma->file->ip);
-    return -1;
-  }
-
-  iunlock(cur_vma->file->ip); // 没有 put 是这个文件之后还需要使用
-                              // 在 unmap 中应该可以 put
-  mappages(p->pagetable, pg_sta, PGSIZE, pa, perm);
-  return 0;
-}

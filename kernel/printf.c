@@ -49,6 +49,20 @@ printint(int xx, int base, int sign)
     consputc(buf[i]);
 }
 
+
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();
+  printf("backtrace:\n");
+  uint64 ret_addr;
+  while ((PGROUNDUP(fp) - PGROUNDDOWN(fp)) == PGSIZE){
+    ret_addr = *((uint64*)(fp-8));
+    printf("%p\n", ret_addr);
+    fp = *((uint64*)(fp-16));
+  }
+}
+
 static void
 printptr(uint64 x)
 {
